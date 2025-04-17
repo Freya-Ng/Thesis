@@ -58,7 +58,7 @@ def load_businesses(business_file, allowed_categories=None):
       business_mapping (dict): Mapping from original business ID to new index.
     """
     if allowed_categories is None:
-        allowed_categories = {"Restaurants"}
+        allowed_categories = {"Food", "Restaurants", "Shopping"}
 
     businesses = {}
     business_mapping = {}
@@ -191,7 +191,7 @@ def main():
     # Mapping from allowed category to output directory.
     category_outputs = {
         "Food": r"/media/leo/Huy/Project/CARS/Yelp JSON/yelp_dataset/Food",
-        "Home Services": r"/media/leo/Huy/Project/CARS/Yelp JSON/yelp_dataset/Home Services",
+        "Restaurants": r"/media/leo/Huy/Project/CARS/Yelp JSON/yelp_dataset/Restaurants",
         "Shopping": r"/media/leo/Huy/Project/CARS/Yelp JSON/yelp_dataset/Shopping"
     }
 
