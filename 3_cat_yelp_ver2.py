@@ -11,9 +11,10 @@ from collections import defaultdict
 def load_users(user_file):
     """
     Loads Yelp user JSON and builds a reduced user feature vector.
+    Now includes:
+      - elite_years: how many seasons the user was “elite” (0 if none)
     Final user feature vector:
-      [ user_id, unique_useful, unique_avg_star, unique_review_count ]
-    Only non-elite users are considered.
+      [ user_id, unique_useful, unique_avg_star, unique_review_count, elite_years ]
     """
     users = {}
     user_mapping = {}
@@ -22,81 +23,95 @@ def load_users(user_file):
         for line in f:
             data = json.loads(line)
             uid = data['user_id']
-            # Skip elite users.
-            if data.get('elite'):
-                continue
+
+            # assign a compact index
             if uid not in user_mapping:
                 user_mapping[uid] = idx
                 idx += 1
-            # Assign new user id starting from 1.
             user_id_feat = user_mapping[uid] + 1
+
+            # existing features
             avg_star = float(data.get('average_stars', 0.0))
-            review_count_val = int(data.get('review_count', 0))
-            useful_val = int(data.get('useful', 0))
-            # Unique feature values: using the raw (or scaled) values plus offsets.
-            # Multiply avg_star by 10 to convert one decimal place to an integer.
-            unique_avg_star = int(round(avg_star * 10)) + 1000
+            unique_avg_star   = int(round(avg_star * 10)) + 1000
+            review_count_val  = int(data.get('review_count', 0))
             unique_review_count = review_count_val + 2000
-            unique_useful = useful_val + 3000
-            users[uid] = [user_id_feat, unique_useful, unique_avg_star, unique_review_count]
+            useful_val        = int(data.get('useful', 0))
+            unique_useful     = useful_val + 3000
+
+            # NEW: count of elite years
+            elite_list = data.get('elite') or []
+            # either as count:
+            elite_years = len(elite_list)
+            # or as binary: elite_flag = 1 if elite_years>0 else 0
+
+            users[uid] = [
+                user_id_feat,
+                unique_useful,
+                unique_avg_star,
+                unique_review_count,
+                elite_years
+            ]
     return users, user_mapping
+
 
 def load_businesses(business_file, allowed_categories=None):
     """
     Loads Yelp business JSON and builds a reduced business feature vector.
+    Now includes:
+      - is_open: 1 if open, 0 if closed
     Final business feature vector:
-      [ business_id, unique_avg_star, unique_review_count, city ]
-    Only open businesses that belong to one of the allowed categories are kept.
-    
-    Parameters:
-      business_file (str): Path to the business JSON file.
-      allowed_categories (set or None): A set of category names to filter by.
-                                        If None, defaults to {"Restaurants"}.
-                                        
-    Returns:
-      businesses (dict): Mapping from business ID to its feature vector.
-      business_mapping (dict): Mapping from original business ID to new index.
+      [ business_id, unique_avg_star, unique_review_count, city_id, is_open ]
     """
     if allowed_categories is None:
         allowed_categories = {"Food", "Restaurants", "Shopping"}
 
     businesses = {}
     business_mapping = {}
-    city_mapping = {}   # new dynamic mapping for city names to a compact unique ID
+    city_mapping = {}
     idx = 0
 
     with open(business_file, 'r', encoding='utf-8') as f:
         for line in f:
             data = json.loads(line)
             bid = data['business_id']
-            raw_cats = data.get('categories')
             cats = []
-            if raw_cats:
-                cats = [cat.strip() for cat in raw_cats.split(',') if cat.strip()]
-            # Filter out businesses that do not belong to at least one allowed category.
+            if data.get('categories'):
+                cats = [c.strip() for c in data['categories'].split(',')]
+
+            # filter categories as before
             if not set(cats).intersection(allowed_categories):
                 continue
-            # Only keep open businesses.
-            if data.get("is_open", 0) != 1:
-                continue
+
+            # assign compact index
             if bid not in business_mapping:
                 business_mapping[bid] = idx
                 idx += 1
-            # Reindex business with an offset (+4000) so the business feature ID is unique.
             business_id_feat = business_mapping[bid] + 1 + 4000
-            stars_val = float(data.get('stars', 0.0))
-            # Multiply stars_val by 10 to capture one decimal of precision.
-            unique_avg_star = int(round(stars_val * 10)) + 5000
-            review_count_val = int(data.get('review_count', 0))
+
+            # existing features
+            stars_val   = float(data.get('stars', 0.0))
+            unique_avg_star   = int(round(stars_val * 10)) + 5000
+            review_count_val  = int(data.get('review_count', 0))
             unique_review_count = review_count_val + 6000
-            # Instead of using a raw frequency count for city,
-            # assign a compact unique ID for each encountered city.
-            city_raw = data.get('city', "").strip()
+
+            # city → compact ID
+            city_raw = data.get('city', '').strip()
             if city_raw not in city_mapping:
-                city_mapping[city_raw] = len(city_mapping) + 1  # start numbering from 1
-            city_val = city_mapping[city_raw]
-            businesses[bid] = [business_id_feat, unique_avg_star, unique_review_count, city_val]
+                city_mapping[city_raw] = len(city_mapping) + 1
+            city_id = city_mapping[city_raw]
+
+            # NEW: open flag
+            is_open = int(data.get('is_open', 0))
+
+            businesses[bid] = [
+                business_id_feat,
+                unique_avg_star,
+                unique_review_count,
+                city_id,
+                is_open
+            ]
     return businesses, business_mapping
+
 
 
 def load_reviews(review_file, users, businesses):
@@ -120,6 +135,56 @@ def load_reviews(review_file, users, businesses):
                 continue
             reviews_by_user[uid].append({'business_id': bid, 'date': date_obj})
     return reviews_by_user
+
+def get_most_common_city(uid, reviews_by_user, businesses):
+    """
+    Determines the most common city that a user interacts with based on their reviews.
+    
+    Parameters:
+      uid (str): The user ID
+      reviews_by_user (dict): Map of user ID to their reviews
+      businesses (dict): Map of business ID to business features
+      
+    Returns:
+      int: The ID of the most common city, or 0 if no data available
+    """
+    city_counts = defaultdict(int)
+    for review in reviews_by_user[uid]:
+        bid = review['business_id']
+        # City is the 4th feature (index 3) in business features
+        city_id = businesses[bid][3]
+        city_counts[city_id] += 1
+    
+    if not city_counts:
+        return 0  # Default if no data available
+    
+    # Return the city with highest frequency
+    return max(city_counts.items(), key=lambda x: x[1])[0]
+
+def add_main_city_to_users(users, reviews_by_user, businesses):
+    """
+    Adds the most common city feature to each user's feature vector.
+    
+    Parameters:
+      users (dict): Map of user ID to user features
+      reviews_by_user (dict): Map of user ID to their reviews
+      businesses (dict): Map of business ID to business features
+      
+    Returns:
+      dict: Updated map of user ID to user features with main city added
+    """
+    updated_users = {}
+    for uid in users:
+        if uid in reviews_by_user:
+            main_city = get_most_common_city(uid, reviews_by_user, businesses)
+            # Add the main city as a new feature at the end
+            updated_features = users[uid] + [main_city]
+            updated_users[uid] = updated_features
+        else:
+            # For users without reviews, set city to 0
+            updated_features = users[uid] + [0]
+            updated_users[uid] = updated_features
+    return updated_users
 
 def frequency_filter_reviews(reviews_by_user, min_user_reviews):
     """
@@ -221,6 +286,11 @@ def main():
         if args.subsample_ratio < 1.0:
             reviews_by_user = stratified_subsample_reviews(reviews_by_user, args.subsample_ratio)
             print(f"After subsampling, {len(reviews_by_user)} users remain for category '{category}'.")
+            
+        # Add main city feature to users based on the current category's reviews
+        print(f"Adding main city feature to users for category '{category}'...")
+        users_with_city = add_main_city_to_users(users, reviews_by_user, businesses)
+        print(f"Main city feature added to user vectors for category '{category}'.")
 
         # ===== Reindex Users =====
         new_user_mapping = {}
@@ -228,7 +298,7 @@ def main():
         new_user_index = 0
         for uid in reviews_by_user.keys():
             new_user_mapping[uid] = new_user_index
-            old_feats = users[uid]
+            old_feats = users_with_city[uid]  # Use the updated users with city feature
             # Update user ID feature with new index (starting from 1).
             new_feats = [new_user_index + 1] + old_feats[1:]
             new_users[uid] = new_feats
